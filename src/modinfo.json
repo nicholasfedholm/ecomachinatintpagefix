@@ -1,0 +1,15 @@
+{
+  "type": "code",
+  "modid": "ecomachinatintpagefix",
+  "name": "Eco Machina Tint Page Fix",
+  "authors": ["Nick"],
+  "description": "Client-side compat patch for Eco Machina 0.6.1. Stops tinted branch billboards that live on a non-zero block atlas page from drawing black by falling back to the untinted connector texture, or by using pre-baked branch textures registered in the block atlas at startup (sleepwillow). Logs diagnostics.",
+  "version": "0.2.0",
+  "side": "Client",
+  "requiredOnClient": false,
+  "requiredOnServer": false,
+  "dependencies": {
+    "game": "1.22.7",
+    "vsecomachina": "*"
+  }
+}
