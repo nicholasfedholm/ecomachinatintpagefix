@@ -14,6 +14,8 @@ namespace EcoMachinaTintPageFix
         // "baked" (default), "untint" or "logonly"
         public string Mode = "baked";
         public int MaxLogLines = 200;
+        // Diagnostic only, default off: 30 s after join, ask Eco Machina for lopcore:sleepwillow v0..v5 and log the result.
+        public bool SelfTest = false;
     }
 
     public class EcoMachinaTintPageFixSystem : ModSystem
@@ -40,11 +42,15 @@ namespace EcoMachinaTintPageFix
 
         public override bool ShouldLoad(EnumAppSide forSide) => forSide == EnumAppSide.Client;
 
-        public override void StartClientSide(ICoreClientAPI api)
+        // 0.2.1: the config must be read before AssetsLoaded. On the client, AssetsLoaded runs before
+        // StartClientSide (0.2.0 read the config in StartClientSide, so AssetsLoaded always saw baked=false
+        // and silently skipped registration). Called from StartPre, AssetsLoaded and StartClientSide; loads once.
+        static bool cfgLoaded;
+        static void EnsureConfig(ICoreAPI api)
         {
-            capi = api;
-            staticApi = api;
-            log = api.Logger;
+            if (log == null) log = api.Logger;
+            if (cfgLoaded) return;
+            cfgLoaded = true;
             try
             {
                 var loaded = api.LoadModConfig<TintPageFixConfig>("ecomachinatintpagefix.json");
@@ -61,6 +67,59 @@ namespace EcoMachinaTintPageFix
             }
             baked = string.Equals(cfg.Mode, "baked", StringComparison.OrdinalIgnoreCase);
             untint = string.Equals(cfg.Mode, "untint", StringComparison.OrdinalIgnoreCase);
+        }
+
+        static ICoreAPI preApi;
+        static Harmony collectHarmony;
+
+        // 0.2.2: StartPre runs during "pre-starting client side mods", before the block texture
+        // collection thread. Patch BlockTextureAtlasManager.CollectTextures so our baked textures are
+        // added to the very atlas instance that is about to be packed (AssetsLoaded runs before
+        // CreateNewAtlas("blocks") and proved unreliable in 0.2.0/0.2.1).
+        public override void StartPre(ICoreAPI api)
+        {
+            if (api.Side != EnumAppSide.Client) return;
+            EnsureConfig(api);
+            preApi = api;
+            if (!baked) { Line("[tintpagefix] StartPre: mode={0}, baked registration not installed.", untint ? "untint" : "logonly"); return; }
+            try
+            {
+                Type t = AccessTools.TypeByName("Vintagestory.Client.NoObf.BlockTextureAtlasManager") ?? AccessTools.TypeByName("BlockTextureAtlasManager");
+                MethodInfo m = t == null ? null : AccessTools.Method(t, "CollectTextures");
+                if (m == null) { log.Warning("[tintpagefix] BlockTextureAtlasManager.CollectTextures not found; baked textures not registered."); return; }
+                collectHarmony = new Harmony(HarmonyId + ".collect");
+                collectHarmony.Patch(m, prefix: new HarmonyMethod(typeof(EcoMachinaTintPageFixSystem), nameof(CollectPrefix)));
+                Line("[tintpagefix] StartPre: patched {0}.CollectTextures for baked registration.", t.Name);
+            }
+            catch (Exception e) { log.Warning("[tintpagefix] CollectTextures patch failed: {0}", e); }
+        }
+
+        public static void CollectPrefix(object __instance)
+        {
+            try
+            {
+                var dict = __instance as ITextureLocationDictionary;
+                if (dict == null || preApi == null) { log?.Warning("[tintpagefix] CollectPrefix: atlas not an ITextureLocationDictionary; nothing registered."); return; }
+                int added = 0, found = 0;
+                foreach (AssetLocation loc in preApi.Assets.GetLocations(BakedPrefix, HarmonyId))
+                {
+                    string path = loc.Path;
+                    if (!path.EndsWith(".png", StringComparison.OrdinalIgnoreCase)) continue;
+                    found++;
+                    string key = path.Substring("textures/".Length, path.Length - "textures/".Length - 4);
+                    if (dict.AddTextureLocation(new AssetLocationAndSource(new AssetLocation(HarmonyId, key)))) added++;
+                }
+                Line("[tintpagefix] registered {0} of {1} baked branch texture(s) in block atlas (CollectTextures prefix).", added, found);
+                if (added == 0) log.Warning("[tintpagefix] baked mode but 0 baked textures registered; tinted page-1 branches will fall back to untinted.");
+            }
+            catch (Exception e) { log?.Warning("[tintpagefix] baked texture registration failed: {0}", e); }
+        }
+
+        public override void StartClientSide(ICoreClientAPI api)
+        {
+            capi = api;
+            staticApi = api;
+            EnsureConfig(api);
             Line("[tintpagefix] mode={0} maxLogLines={1}", baked ? "baked" : untint ? "untint" : "logonly", cfg.MaxLogLines);
 
             harmony = new Harmony(HarmonyId);
@@ -82,34 +141,6 @@ namespace EcoMachinaTintPageFix
 
         // Runs before the block atlas texture collection thread starts (see README): register our
         // pre-baked branch textures into the block atlas texture list so they are packed at atlas creation.
-        public override void AssetsLoaded(ICoreAPI api)
-        {
-            if (!baked || !(api is ICoreClientAPI c)) return;
-            try
-            {
-                var dict = c.BlockTextureAtlas as ITextureLocationDictionary;
-                if (dict == null)
-                {
-                    log.Warning("[tintpagefix] block atlas is not an ITextureLocationDictionary; baked textures not registered.");
-                    return;
-                }
-                int added = 0;
-                foreach (AssetLocation loc in c.Assets.GetLocations(BakedPrefix, HarmonyId))
-                {
-                    string path = loc.Path;
-                    if (!path.EndsWith(".png", StringComparison.OrdinalIgnoreCase)) continue;
-                    // atlas key is the texture path without "textures/" and ".png"
-                    string key = path.Substring("textures/".Length, path.Length - "textures/".Length - 4);
-                    if (dict.AddTextureLocation(new AssetLocationAndSource(new AssetLocation(HarmonyId, key)))) added++;
-                }
-                Line("[tintpagefix] registered {0} baked branch texture(s) in block atlas at AssetsLoaded.", added);
-            }
-            catch (Exception e)
-            {
-                log.Warning("[tintpagefix] baked texture registration failed: {0}", e);
-            }
-        }
-
         int Patch(ICoreClientAPI api, Type t, string name, string prefix, string postfix, string typeName)
         {
             try
@@ -150,10 +181,66 @@ namespace EcoMachinaTintPageFix
                 {
                     Line("[tintpagefix] block atlas page {0} texId={1}", i, atlas.AtlasTextures[i].TextureId);
                 }
+                if (cfg.SelfTest) capi.Event.RegisterCallback(_ => SelfTest(), 30000);
             }
             catch (Exception e)
             {
                 Fail("AtlasTick", e);
+            }
+        }
+
+        // Opt-in diagnostic: calls EM's TryGetTintedAtlasPosition (through any of our patches) for the willow.
+        void SelfTest()
+        {
+            try
+            {
+                string mode = baked ? "baked" : untint ? "untint" : "logonly";
+                Type t = AccessTools.TypeByName(TintTypeName);
+                MethodInfo m = t == null ? null : AccessTools.Method(t, "TryGetTintedAtlasPosition");
+                if (m == null) { Line("[tintpagefix] selftest: {0}.TryGetTintedAtlasPosition not found.", TintTypeName); return; }
+                object inst = null;
+                if (!m.IsStatic)
+                {
+                    // EM keeps the instance the renderer uses in FoliageBillboardMesher.tintingSystem (static),
+                    // and another reference in EcoMachinaModSystem.branchColorTintingSystem.
+                    Type mesher = AccessTools.TypeByName("vsecomachina.Integration.TaperedWood.FoliageBillboardMesher");
+                    FieldInfo sf = mesher == null ? null : AccessTools.Field(mesher, "tintingSystem");
+                    if (sf != null && sf.IsStatic) inst = sf.GetValue(null);
+                    string src = "FoliageBillboardMesher.tintingSystem";
+                    if (inst == null)
+                    {
+                        src = "EcoMachinaModSystem.branchColorTintingSystem";
+                        foreach (var sys in capi.ModLoader.Systems)
+                        {
+                            FieldInfo f = AccessTools.Field(sys.GetType(), "branchColorTintingSystem");
+                            if (f != null && !f.IsStatic) { inst = f.GetValue(sys); if (inst != null) break; }
+                        }
+                    }
+                    if (inst == null) { Line("[tintpagefix] selftest: no {0} instance found.", t.Name); return; }
+                    Line("[tintpagefix] selftest: using {0}.", src);
+                }
+                var ps = m.GetParameters();
+                for (int v = 0; v < 6; v++)
+                {
+                    object[] args = new object[ps.Length];
+                    for (int i = 0; i < ps.Length; i++)
+                    {
+                        Type pt = ps[i].ParameterType;
+                        if (ps[i].Name == "domain") args[i] = "lopcore";
+                        else if (ps[i].Name == "woodType") args[i] = "sleepwillow";
+                        else if (ps[i].Name == "variantIndex") args[i] = v;
+                        else if (!pt.IsByRef && pt.IsValueType) args[i] = Activator.CreateInstance(pt);
+                    }
+                    object r = m.Invoke(inst, args);
+                    TextureAtlasPosition pos = null;
+                    foreach (object o in args) if (o is TextureAtlasPosition tp) pos = tp;
+                    Line("[tintpagefix] selftest mode={0} lopcore:sleepwillow v{1}: result={2} page={3} texId={4}",
+                        mode, v, r, pos == null ? "null" : pos.atlasNumber.ToString(), pos == null ? "null" : pos.atlasTextureId.ToString());
+                }
+            }
+            catch (Exception e)
+            {
+                log?.Warning("[tintpagefix] selftest failed: {0}", e);
             }
         }
 
