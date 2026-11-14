@@ -1,4 +1,4 @@
-# Eco Machina Tint Page Fix 0.2.2
+# Eco Machina Tint Page Fix 0.2.3
 
 Client-side compat patch for Eco Machina (vsecomachina) 0.6.1 on Vintage Story 1.22.7.
 
@@ -40,3 +40,7 @@ Remove this mod once Eco Machina fixes page-1 tinted billboards.
 - `[tintpagefix] baked`, `[tintpagefix] untinted`, `[tintpagefix] selftest`
 - `[tintpagefix] billboard route`, `[tintpagefix] block atlas page`
 - `[tintpagefix] patched` and `[tintpagefix]` warnings (missing targets)
+
+## 0.2.3: branches matched to the bark colour
+EM's tint math lands the willow branches darker and warmer than the trunk (mean about 132/114/100 vs bark 171/163/171). 0.2.3 runs tools/match_bark.py after bake_branches.py: each baked PNG is scaled per channel so its mean equals the bark's mean, keeping EM's connector grain and shading. Code unchanged from 0.2.2.
+Usage: `python -I tools/match_bark.py <LoP-Core zip> [woodType] [strength]` (strength 1.0 = full match).
